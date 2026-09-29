@@ -1,0 +1,147 @@
+这份文档将作为你第一个正式简历项目的**“开发蓝皮书”**。它涵盖了从数据库底层设计到业务逻辑实现的所有细节。
+
+项目名称建议：LinkHub - 层次化知识协作与社交平台
+
+一、 技术栈（Stack）
+
+  - 后端: Java 17+, Spring Boot 3.x
+  - 持久化: Spring Data JPA
+  - 数据库: PostgreSQL (Docker 运行)
+  - 构建工具: Maven
+  - 其他: Lombok (简化代码), Jakarta Persistence API
+
+  【新增】Redis 缓存（后期加分项，不影响 Week 1-3 基础实现）：
+      - spring-boot-starter-data-redis，Docker 运行 (端口 6379，无密码)
+      - 用途 ① 浏览计数 (INCR + 定时回写 DB)
+      - 用途 ② 帖子详情缓存 (cache-aside，处理穿透/击穿/雪崩)
+      - 用途 ③ 分类树缓存 (cache-aside，长 TTL)
+      - 只缓存 DTO，绝不直接缓存 Entity（避免懒加载异常与 JSON 死循环）
+
+二、 核心实体模型与关联设计 (Entity & Association)
+
+这是项目的“骨架”，必须严格按照以下关系建模：
+
+1. 用户模块
+
+  - User (用户表)
+      - 字段：id, username, password, email
+      - 关联：OneToOne -> UserProfile (由 Profile 维护外键)
+      - 关联：OneToMany -> Post (用户发的帖子)
+  - UserProfile (用户详情表)
+      - 字段：id, avatar, bio (简介), location
+      - 关联：OneToOne -> User (唯一外键 user_id)
+
+2. 内容组织模块
+
+  - Category (分类表 - 自关联结构)
+      - 字段：id, name, description
+      - 关联：ManyToOne -> parent (指向父分类)
+      - 关联：OneToMany -> children (指向子分类列表)
+      - 关联：OneToMany -> Post (该分类下的所有帖子)
+  - Tag (标签表)
+      - 字段：id, tagName (唯一索引)
+      - 关联：ManyToMany -> Post (被 Post 维护)
+
+3. 核心业务模块
+
+  - Post (帖子/文章表)
+      - 字段：id, title, content (TEXT), views (浏览量)
+      - 关联：ManyToOne -> User (作者)
+      - 关联：ManyToOne -> Category (所属分类)
+      - 关联：ManyToMany -> Tag (中间表 t_post_tags)
+      - 关联：OneToMany -> Comment (评论列表)
+  - Comment (评论表)
+      - 字段：id, content, createTime
+      - 关联：ManyToOne -> Post (所属帖子)
+      - 关联：ManyToOne -> User (评论者)
+
+三、 核心功能需求清单 (Functional Requirements)
+
+你需要实现的具体业务逻辑：
+
+1. 分类管理 (Category Service)
+
+  - 无限层级创建：支持在任意分类下创建子分类。
+  - 分类树查询：返回一个嵌套的 JSON 结构，展示所有分类及其子分类。
+  - 安全删除：如果一个分类下还有帖子，禁止删除；或者删除时将帖子移动至“未分类”。
+
+2. 文章发布与管理 (Post Service)
+
+  - 智能发帖：
+      - 接收标签名称列表（如 ["Java", "Spring"]）。
+      - 内部逻辑：检查标签库，已存在的直接关联 ID，不存在的先存入 Tag 表再关联。
+  - 多维检索：
+      - 支持 keyword (标题或内容模糊搜索)。
+      - 支持 categoryId (筛选特定分类)。
+      - 支持 tagName (筛选特定标签)。
+      - 必须分页：每页 10 条，按 createTime 倒序。
+  - 浏览量统计：每次查看详情时，views 字段自增。
+
+3. 评论系统 (Comment Service)
+
+  - 级联清理：当帖子被删除时，其下所有评论必须被自动物理删除。
+  - 孤儿删除：支持从帖子中直接剔除某条评论（通过 List.remove() 触发数据库删除）。
+
+【新增】4. 性能优化 (Redis 缓存，加分项，放在 Week 3 之后做)
+
+  - 浏览计数：
+      - 用 Redis INCR 原子自增浏览量（key: post:views:{id}），
+        定时任务（@Scheduled + @EnableScheduling）批量回写 t_post.views。
+      - 面试点：原子操作、读写分离、延迟落库（write-behind）。
+  - 帖子详情缓存：
+      - Cache-aside 模式：先查 Redis，未命中再查 DB 并写回缓存。
+      - 只缓存 PostResponse DTO，带 TTL 并加随机秒数。
+      - 面试点：缓存穿透（空值缓存）、击穿（互斥锁/逻辑过期）、雪崩（随机过期时间）。
+      - 一致性：更新/删除帖子时主动删缓存（先更新 DB 再删缓存）。
+  - 分类树缓存：
+      - 分类树读多写少，整体缓存（key: category:tree，长 TTL）。
+      - 分类创建/删除时主动失效缓存。
+
+四、 简历加分项：JPA 高级配置 (Advanced Config)
+
+这些是体现你“专业度”的地方：
+
+1.  JPA Auditing (审计)：
+      - 所有表必须有 createdAt 和 updatedAt 字段。
+      - 使用 @CreatedDate 和 @LastModifiedDate 自动填充。
+2.  BaseEntity (基础父类)：
+      - 创建一个 @MappedSuperclass，把 ID 和审计字段放进去，所有实体继承它，减少重复代码。
+3.  DTO 模式 (Data Transfer Object)：
+      - 不要直接在 Controller 返回 Entity。
+      - 编写 DTO 类。例如 PostResponse 隐藏掉 User 的密码字段，解决双向关联导致的 JSON 递归死循环。
+
+五、 项目开发计划 (Roadmap)
+
+  - Week 1: 环境与建模
+      - 配置 pom.xml 和 Docker PostgreSQL。
+      - 编写所有 Entity 类并运行程序，确保 Hibernate 自动在数据库生成了正确的表和外键。
+  - Week 2: 仓库与基础业务
+      - 编写 Repository 接口（练习方法名推导查询）。
+      - 编写 Service 处理发帖和分类树逻辑。
+  - Week 3: 接口与测试
+      - 编写 Controller 实现 RESTful 接口。
+      - 使用 Postman 测试分页搜索和标签关联是否正确。
+
+  【新增】Week 4: Redis 性能优化（加分项）
+      - 接入 spring-boot-starter-data-redis，配置 RedisTemplate 序列化。
+      - 浏览计数改 Redis INCR + @Scheduled 定时回写数据库。
+      - 帖子详情 Cache-aside + 空值缓存 + 随机过期（防穿透/击穿/雪崩）。
+      - 分类树整体缓存 + 变更时失效。
+
+六、 预期的系统目录结构
+
+src/main/java/com/yourname/linkhub/
+├── config/             # JPA Auditing 配置 【新增】+ Redis 序列化配置 (Week 4)
+├── controller/         # API 入口
+├── dto/                # 数据传输对象（返回给前端的结构）
+├── entity/             # 数据库实体（你之前练的部分）
+├── repository/         # JPA 仓库接口
+└── service/            # 核心业务逻辑（最重要的部分）
+
+  【新增】exception/        # 统一异常处理（BusinessException + @RestControllerAdvice，Week 3）
+
+你的下一步：
+
+从环境搭建开始。 你需要先创建一个 Spring Boot 项目。
+
+如果你准备好了，我可以先给你提供这个项目的 pom.xml 依赖配置，以及 application.yml 的数据库连接模板。需要吗？
